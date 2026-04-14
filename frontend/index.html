@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Distributed Drawing Board (RAFT)</title>
     <link rel="stylesheet" href="style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Outfit:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Comic+Neue:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="app-container">
         <header>
-            <h1>RAFT Board<span>.</span></h1>
+            <h1>Drawing Class<span>!</span></h1>
             <div class="status-panel">
                 <div class="status-indicator" id="ws-status">
                     <span class="dot"></span> Connection: Connecting
@@ -18,7 +18,17 @@
                 <div class="status-indicator" id="leader-status">
                     <span class="badge">LEADER: <span id="leader-id">ELECTION...</span></span>
                 </div>
+                <div class="status-indicator" id="health-status">
+                    <span class="badge">HEALTH: <span id="health-id">Checking...</span></span>
+                </div>
+                <div class="status-indicator" id="identity-status">
+                    <span class="badge">ME: <span id="student-number">?</span></span>
+                </div>
+                <div class="status-indicator" id="class-status">
+                    <span class="badge">CLASS: <span id="class-size">0</span></span>
+                </div>
             </div>
+            <p class="rule-hint">💡 Kid's Rule: We need 2 out of 3 friends to start drawing!</p>
         </header>
         
         <main class="canvas-container">
@@ -42,6 +52,20 @@
                 </div>
             </div>
         </main>
+
+        <section class="dashboard-container">
+            <div class="dashboard-header">
+                <h3><span id="monitoring-label">Monitoring: Replica 1</span></h3>
+                <div class="replica-toggles">
+                    <button class="replica-btn active" data-port="4001">Replica 1</button>
+                    <button class="replica-btn" data-port="4002">Replica 2</button>
+                    <button class="replica-btn" data-port="4003">Replica 3</button>
+                </div>
+            </div>
+            <div class="log-viewer" id="log-viewer">
+                <div class="log-entry">Waiting for replica data...</div>
+            </div>
+        </section>
         
         <footer>
             <p>Distributed Consensus Cluster &bull; <span>3 Nodes</span> &bull; RAFT-Lite v1.0</p>

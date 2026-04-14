@@ -51,6 +51,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (message.type === 'leader_update') {
                 leaderIdSpan.innerText = message.leaderId || 'Election in progress...';
+            } else if (message.type === 'identity_update') {
+                document.getElementById('student-number').innerText = `Student ${message.studentId}`;
+            } else if (message.type === 'class_update') {
+                document.getElementById('class-size').innerText = `${message.count} Students`;
             } else if (message.type === 'sync') {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 localStrokes = message.data || [];
@@ -141,4 +145,94 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         localStrokes = [];
     });
-});
+
+    // --- Cluster Health Logic ---
+    const healthIdSpan = document.getElementById('health-id');
+    const healthStatusDiv = document.getElementById('health-status');
+
+    async function updateClusterHealth() {
+        const ports = [4001, 4002, 4003];
+        let aliveCount = 0;
+
+        const checks = ports.map(async p => {
+            try {
+                const res = await fetch(`http://localhost:${p}/health`, { signal: AbortSignal.timeout(500) });
+                if (res.ok) aliveCount++;
+            } catch (e) {}
+        });
+
+        await Promise.all(checks);
+
+        if (aliveCount >= 2) {
+            healthIdSpan.innerText = `${aliveCount}/3 (Healthy)`;
+            healthStatusDiv.style.background = "#6BCB77"; // Grass Green
+        } else {
+            healthIdSpan.innerText = `${aliveCount}/3 (No Majority!)`;
+            healthStatusDiv.style.background = "#FF5E5E"; // Crayola Red
+            
+            // Add a friendly warning to the chalkboard
+            const warningCode = `[!] WAITING: Teacher is busy! (We need 2+ friends online to share drawings)`;
+            if (!logViewer.innerText.includes(warningCode)) {
+                const entry = document.createElement('div');
+                entry.className = 'log-entry';
+                entry.style.color = "#FFCDD2";
+                entry.style.fontWeight = "bold";
+                entry.innerText = warningCode;
+                logViewer.prepend(entry);
+            }
+        }
+    }
+    setInterval(updateClusterHealth, 2000);
+    updateClusterHealth();
+
+    // --- Dashboard Logic ---
+    const logViewer = document.getElementById('log-viewer');
+    const replicaBtns = document.querySelectorAll('.replica-btn');
+    const monitoringLabel = document.getElementById('monitoring-label');
+    let activePort = "4001";
+    let lastLogsJson = "";
+
+    replicaBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            replicaBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            activePort = btn.dataset.port;
+            lastLogsJson = ""; // Force refresh
+            monitoringLabel.innerText = `Class Monitoring: Replica ${btn.innerText.split(' ')[1]}`;
+            logViewer.innerHTML = `<div class="log-entry">Switched to Replica on port ${activePort}...</div>`;
+        });
+    });
+
+    async function fetchLogs() {
+        try {
+            const response = await fetch(`http://localhost:${activePort}/logs`);
+            if (!response.ok) throw new Error("Offline");
+            const logs = await response.json();
+            const logsJson = JSON.stringify(logs);
+
+            // Only update DOM if logs changed
+            if (logsJson !== lastLogsJson) {
+                lastLogsJson = logsJson;
+                if (logs.length === 0) {
+                    logViewer.innerHTML = `<div class="log-entry">No logs yet for this replica.</div>`;
+                } else {
+                    logViewer.innerHTML = logs.map(log => {
+                        // Highlight key status changes
+                        let color = '';
+                        if (log.indexOf('LEADER') !== -1) color = 'color: var(--leader-color)';
+                        if (log.indexOf('Follower') !== -1) color = 'color: var(--text-secondary)';
+                        if (log.indexOf('ELECTION') !== -1) color = 'color: var(--accent-color)';
+                        
+                        return `<div class="log-entry" style="${color}">${log}</div>`;
+                    }).join('');
+                    logViewer.scrollTop = logViewer.scrollHeight;
+                }
+            }
+        } catch (err) {
+            logViewer.innerHTML = `<div class="log-entry" style="color: var(--danger-color)">REPLICA OFFLINE: Replica at :${activePort} is unreachable.</div>`;
+        }
+    }
+
+    setInterval(fetchLogs, 1000);
+    fetchLogs();
+});

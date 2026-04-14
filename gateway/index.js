@@ -12,10 +12,21 @@ const wss = new WebSocket.Server({ server, path: '/ws' });
 
 let currentLeaderUrl = null;
 let currentLeaderId = null;
-const clients = new Set();
+let studentIdCounter = 0;
+const clients = new Map(); // Store ws -> studentNumber
 
 wss.on('connection', ws => {
-    clients.add(ws);
+    studentIdCounter++;
+    const myStudentId = studentIdCounter;
+    clients.set(ws, myStudentId);
+
+    // Tell this client who they are
+    ws.send(JSON.stringify({ type: 'identity_update', studentId: myStudentId }));
+
+    // Tell everyone about the new class size
+    const classMsg = JSON.stringify({ type: 'class_update', count: clients.size });
+    clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(classMsg));
+
     ws.send(JSON.stringify({ type: 'leader_update', leaderId: currentLeaderId }));
 
     if (currentLeaderUrl) {
@@ -36,16 +47,35 @@ wss.on('connection', ws => {
         }
     });
 
-    ws.on('close', () => clients.delete(ws));
+    ws.on('close', () => {
+        clients.delete(ws);
+        // Update everyone with the new smaller class size
+        const classMsg = JSON.stringify({ type: 'class_update', count: clients.size });
+        clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(classMsg));
+    });
 });
 
-app.post('/leader', (req, res) => {
+app.post('/leader', async (req, res) => {
     const { leaderId, port } = req.body;
     currentLeaderId = leaderId;
     currentLeaderUrl = leaderId ? `http://${leaderId}:${port}` : null;
     
-    const msg = JSON.stringify({ type: 'leader_update', leaderId });
-    clients.forEach(c => c.readyState === WebSocket.OPEN && c.send(msg));
+    // Notify clients about the leader
+    const leaderMsg = JSON.stringify({ type: 'leader_update', leaderId });
+    clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(leaderMsg));
+
+    // IMPORTANT: If a new leader is elected, fetch its log and sync everyone.
+    // This fixes the "blank screen" bug during failover.
+    if (currentLeaderUrl) {
+        try {
+            const stateRes = await axios.get(`${currentLeaderUrl}/state`, { timeout: 1000 });
+            const syncMsg = JSON.stringify({ type: 'sync', data: stateRes.data.log });
+            clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(syncMsg));
+        } catch (err) {
+            console.error("[GATEWAY] Failed to sync state from new leader");
+        }
+    }
+
     res.sendStatus(200);
 });
 
@@ -57,7 +87,7 @@ app.post('/broadcast', (req, res) => {
         data: data.type === 'batch' ? data.strokes : [data] 
     });
 
-    clients.forEach(c => c.readyState === WebSocket.OPEN && c.send(msg));
+    clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(msg));
     res.sendStatus(200);
 });
 

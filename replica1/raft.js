@@ -29,7 +29,16 @@ class RAFTNode {
         this.broadcastBuffer = [];
         this.broadcastTimeout = null;
 
-        console.log(`[RAFT] Init ${this.id}`);
+        this.events = [];
+        this.addEvent(`RAFT Init ${this.id}`);
+    }
+
+    addEvent(msg) {
+        const timestamp = new Date().toLocaleTimeString();
+        const event = `[${timestamp}] ${msg}`;
+        this.events.push(event);
+        if (this.events.length > 50) this.events.shift();
+        console.log(event);
     }
 
     start() {
@@ -37,7 +46,7 @@ class RAFTNode {
     }
 
     getRandomTimeout() {
-        return Math.floor(Math.random() * 300) + 500;
+        return Math.floor(Math.random() * 1000) + 1500;
     }
 
     resetElectionTimeout() {
@@ -53,7 +62,7 @@ class RAFTNode {
         this.leaderId = null;
         let votesCount = 1;
 
-        console.log(`[ELECTION] ${this.id} term ${this.currentTerm}`);
+        this.addEvent(`ELECTION Start term ${this.currentTerm}`);
         this.resetElectionTimeout();
 
         const votePromises = this.peers.map(async peerRef => {
@@ -85,7 +94,7 @@ class RAFTNode {
     }
 
     becomeLeader() {
-        console.log(`[LEADER] ${this.id} term ${this.currentTerm}`);
+        this.addEvent(`LEADER Elected for term ${this.currentTerm}`);
         this.state = 'Leader';
         this.leaderId = this.id;
         clearTimeout(this.electionTimeout);
@@ -113,7 +122,7 @@ class RAFTNode {
             this.votedFor = null;
         }
         if (this.state !== 'Follower') {
-            console.log(`[STATE] ${this.id} -> Follower`);
+            this.addEvent(`STATE Change -> Follower (Term ${this.currentTerm})`);
             clearInterval(this.heartbeatInterval);
             this.state = 'Follower';
             // Fail any pending promises
@@ -233,6 +242,7 @@ class RAFTNode {
         if (n > this.commitIndex && this.log[n] && this.log[n].term === this.currentTerm) {
             const oldCommit = this.commitIndex;
             this.commitIndex = n;
+            this.addEvent(`SUCCESS: Majority committed strokes up to index ${n}`);
 
             for (let i = oldCommit + 1; i <= n; i++) {
                 const entry = this.log[i];

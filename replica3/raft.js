@@ -45,6 +45,27 @@ class RAFTNode {
         this.resetElectionTimeout();
     }
 
+    getClusterSize() {
+        return this.peers.length + 1;
+    }
+
+    getQuorumSize() {
+        return Math.floor(this.getClusterSize() / 2) + 1;
+    }
+
+    async countAlivePeers() {
+        const checks = this.peers.map(async peer => {
+            try {
+                const response = await axios.get(`http://${peer}/health`, { timeout: 200 });
+                return response.status === 200;
+            } catch (err) {
+                return false;
+            }
+        });
+        const results = await Promise.all(checks);
+        return results.filter(Boolean).length;
+    }
+
     getRandomTimeout() {
         return Math.floor(Math.random() * 300) + 500;
     }
@@ -68,6 +89,15 @@ class RAFTNode {
         this.addEvent(`ELECTION Start term ${this.currentTerm}`);
         this.resetElectionTimeout();
 
+        const alivePeers = await this.countAlivePeers();
+        const liveNodes = alivePeers + 1;
+        const majority = this.getQuorumSize();
+
+        if (liveNodes < majority) {
+            this.addEvent(`ELECTION Aborted term ${this.currentTerm}: live nodes ${liveNodes}/${this.getClusterSize()} below quorum ${majority}`);
+            return;
+        }
+
         const votePromises = this.peers.map(async peerRef => {
             try {
                 const response = await axios.post(`http://${peerRef}/request-vote`, {
@@ -89,14 +119,20 @@ class RAFTNode {
         const results = await Promise.all(votePromises);
         votesCount += results.filter(Boolean).length;
 
-        const majority = Math.floor((this.peers.length + 1) / 2) + 1;
-
         if (this.state === 'Candidate' && votesCount >= majority) {
-            this.becomeLeader();
+            await this.becomeLeader();
         }
     }
 
-    becomeLeader() {
+    async becomeLeader() {
+        const alivePeers = await this.countAlivePeers();
+        const liveNodes = alivePeers + 1;
+        const majority = this.getQuorumSize();
+        if (liveNodes < majority) {
+            this.addEvent(`LEADER Promotion blocked for term ${this.currentTerm}: live nodes ${liveNodes}/${this.getClusterSize()} below quorum ${majority}`);
+            return;
+        }
+
         this.addEvent(`LEADER Elected for term ${this.currentTerm}`);
         this.state = 'Leader';
         this.leaderId = this.id;

@@ -13,7 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentY = 0;
     let reconnectDelay = 200; // start fast, back off only if needed
 
-    const clientId = Math.random().toString(36).substring(2, 15);
+    const clientId = localStorage.getItem('drawingClientId') || Math.random().toString(36).substring(2, 15);
+    localStorage.setItem('drawingClientId', clientId);
 
     // Lives outside connectWebSocket — survives reconnects
     let localStrokes = [];
@@ -40,6 +41,31 @@ document.addEventListener('DOMContentLoaded', () => {
             .catch(() => {});
     }
 
+    async function refreshLeaderStateIfNeeded() {
+        if (!currentLeaderId) return;
+
+        const portMap = { replica1: 4001, replica2: 4002, replica3: 4003 };
+        const port = portMap[currentLeaderId];
+        if (!port) return;
+
+        try {
+            const res = await fetch(`http://localhost:${port}/state`, { signal: AbortSignal.timeout(1000) });
+            if (!res.ok) return;
+            const data = await res.json();
+            const remoteLog = Array.isArray(data.log) ? data.log : [];
+
+            const localJson = JSON.stringify(localStrokes);
+            const remoteJson = JSON.stringify(remoteLog);
+            if (localJson !== remoteJson) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                localStrokes = remoteLog;
+                localStrokes.forEach(s => drawStrokeOnCanvas(s));
+            }
+        } catch (err) {
+            // ignore leader state fetch failures
+        }
+    }
+
     function connectWebSocket() {
         wsReady = false;
         ws = new WebSocket(wsUrl);
@@ -49,6 +75,7 @@ document.addEventListener('DOMContentLoaded', () => {
             reconnectDelay = 200; // reset backoff on success
             wsStatusText.innerHTML = '<span class="dot connected"></span> Connection: Connected';
             console.log('[WS] Connected');
+            ws.send(JSON.stringify({ type: 'identify', clientId }));
             // Sync canvas on reconnect
             if (currentLeaderId) {
                 syncCanvasFromLeader(currentLeaderId);
@@ -80,6 +107,10 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (message.type === 'class_update') {
                 document.getElementById('class-size').innerText = `${message.count} Students`;
             } else if (message.type === 'sync') {
+                if (message.leaderId) {
+                    currentLeaderId = message.leaderId;
+                    leaderIdSpan.innerText = message.leaderId || 'Election in progress...';
+                }
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 localStrokes = message.data || [];
                 localStrokes.forEach(s => drawStrokeOnCanvas(s));
@@ -98,6 +129,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     connectWebSocket();
+    setInterval(refreshLeaderStateIfNeeded, 2500);
 
     // --- Drawing ---
 

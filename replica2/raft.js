@@ -46,7 +46,7 @@ class RAFTNode {
     }
 
     getRandomTimeout() {
-        return Math.floor(Math.random() * 1000) + 1500;
+        return Math.floor(Math.random() * 300) + 500;
     }
 
     resetElectionTimeout() {
@@ -56,6 +56,9 @@ class RAFTNode {
     }
 
     async startElection() {
+        if (this.state === 'Follower') {
+            this.addEvent('STATE Transition -> Candidate (missed heartbeat)');
+        }
         this.state = 'Candidate';
         this.currentTerm++;
         this.votedFor = this.id;

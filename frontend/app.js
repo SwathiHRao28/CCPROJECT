@@ -23,6 +23,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let ws;
     let wsReady = false;
+    let currentLeaderId = null;
+
+    function syncCanvasFromLeader(leaderId) {
+        const portMap = { replica1: 4001, replica2: 4002, replica3: 4003 };
+        const port = portMap[leaderId];
+        if (!port) return;
+
+        fetch(`http://localhost:${port}/state`, { signal: AbortSignal.timeout(1000) })
+            .then(res => res.json())
+            .then(data => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                localStrokes = data.log || [];
+                localStrokes.forEach(s => drawStrokeOnCanvas(s));
+            })
+            .catch(() => {});
+    }
 
     function connectWebSocket() {
         wsReady = false;
@@ -33,6 +49,10 @@ document.addEventListener('DOMContentLoaded', () => {
             reconnectDelay = 200; // reset backoff on success
             wsStatusText.innerHTML = '<span class="dot connected"></span> Connection: Connected';
             console.log('[WS] Connected');
+            // Sync canvas on reconnect
+            if (currentLeaderId) {
+                syncCanvasFromLeader(currentLeaderId);
+            }
         };
 
         ws.onclose = () => {
@@ -50,7 +70,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const message = JSON.parse(event.data);
 
             if (message.type === 'leader_update') {
+                currentLeaderId = message.leaderId;
                 leaderIdSpan.innerText = message.leaderId || 'Election in progress...';
+                if (currentLeaderId) {
+                    syncCanvasFromLeader(currentLeaderId);
+                }
             } else if (message.type === 'identity_update') {
                 document.getElementById('student-number').innerText = `Student ${message.studentId}`;
             } else if (message.type === 'class_update') {
@@ -185,6 +209,31 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(updateClusterHealth, 2000);
     updateClusterHealth();
 
+    // --- Replica Status Updates ---
+    async function updateReplicaStatuses() {
+        const replicas = [
+            { id: 'replica1', port: 4001 },
+            { id: 'replica2', port: 4002 },
+            { id: 'replica3', port: 4003 }
+        ];
+
+        for (const rep of replicas) {
+            try {
+                const res = await fetch(`http://localhost:${rep.port}/state`, { signal: AbortSignal.timeout(500) });
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById(`${rep.id}-state`).innerText = data.state.toUpperCase();
+                } else {
+                    throw new Error();
+                }
+            } catch (e) {
+                document.getElementById(`${rep.id}-state`).innerText = 'NOT AVAILABLE';
+            }
+        }
+    }
+    setInterval(updateReplicaStatuses, 2000);
+    updateReplicaStatuses();
+
     // --- Dashboard Logic ---
     const logViewer = document.getElementById('log-viewer');
     const replicaBtns = document.querySelectorAll('.replica-btn');
@@ -235,4 +284,4 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setInterval(fetchLogs, 1000);
     fetchLogs();
-});
+});

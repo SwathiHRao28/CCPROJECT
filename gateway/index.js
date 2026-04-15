@@ -14,6 +14,44 @@ let currentLeaderUrl = null;
 let currentLeaderId = null;
 let studentIdCounter = 0;
 const clients = new Map(); // Store ws -> studentNumber
+const committedLog = [];
+const replicaPorts = [4001, 4002, 4003];
+
+async function discoverLeaderFromReplicas() {
+    for (const port of replicaPorts) {
+        try {
+            const res = await axios.get(`http://localhost:${port}/state`, { timeout: 500 });
+            if (res.data && res.data.state === 'Leader' && res.data.id) {
+                return { leaderId: res.data.id, port, log: Array.isArray(res.data.log) ? res.data.log : [] };
+            }
+        } catch (e) {
+            // ignore unreachable replica
+        }
+    }
+    return null;
+}
+
+function broadcastLeaderUpdate(leaderId) {
+    const leaderMsg = JSON.stringify({ type: 'leader_update', leaderId });
+    clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(leaderMsg));
+}
+
+function broadcastSync(logData) {
+    const syncMsg = JSON.stringify({ type: 'sync', data: logData });
+    clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(syncMsg));
+}
+
+async function refreshLeaderState(leaderId, port, sourceLog = []) {
+    currentLeaderId = leaderId;
+    currentLeaderUrl = leaderId ? `http://${leaderId}:${port}` : null;
+    console.log(`[GATEWAY] refreshed leader state: ${leaderId} @ ${port}`);
+    broadcastLeaderUpdate(leaderId);
+    committedLog.length = 0;
+    if (Array.isArray(sourceLog)) {
+        committedLog.push(...sourceLog);
+    }
+    broadcastSync(committedLog);
+}
 
 wss.on('connection', ws => {
     studentIdCounter++;
@@ -29,21 +67,47 @@ wss.on('connection', ws => {
 
     ws.send(JSON.stringify({ type: 'leader_update', leaderId: currentLeaderId }));
 
-    if (currentLeaderUrl) {
+    if (committedLog.length > 0) {
+        ws.send(JSON.stringify({ type: 'sync', data: committedLog }));
+    } else if (currentLeaderUrl) {
         axios.get(`${currentLeaderUrl}/state`, { timeout: 1000 })
-            .then(res => ws.send(JSON.stringify({ type: 'sync', data: res.data.log })))
+            .then(res => {
+                if (Array.isArray(res.data.log)) {
+                    committedLog.push(...res.data.log);
+                }
+                ws.send(JSON.stringify({ type: 'sync', data: res.data.log }));
+            })
             .catch(() => {});
     }
 
     ws.on('message', async msg => {
         const parsed = JSON.parse(msg);
-        if (parsed.type === 'stroke' && currentLeaderUrl) {
-            try {
-                // Increased timeout to 2s to survive single-node failures
-                await axios.post(`${currentLeaderUrl}/stroke`, parsed.data, { timeout: 2000 });
-            } catch (err) {
-                console.error("[GATEWAY] Stroke failed: Leader likely busy/down");
+        if (parsed.type === 'stroke') {
+            const sendStroke = async (url) => {
+                await axios.post(`${url}/stroke`, parsed.data, { timeout: 2000 });
+            };
+
+            if (currentLeaderUrl) {
+                try {
+                    await sendStroke(currentLeaderUrl);
+                    return;
+                } catch (err) {
+                    console.warn("[GATEWAY] Stroke failed on current leader, rediscovering leader...");
+                }
             }
+
+            const leaderInfo = await discoverLeaderFromReplicas();
+            if (leaderInfo) {
+                await refreshLeaderState(leaderInfo.leaderId, leaderInfo.port, leaderInfo.log);
+                try {
+                    await sendStroke(currentLeaderUrl);
+                    return;
+                } catch (err) {
+                    console.error("[GATEWAY] Stroke retry failed on discovered leader", err.message);
+                }
+            }
+
+            console.error("[GATEWAY] Stroke failed: no leader available or stroke could not be delivered");
         }
     });
 
@@ -59,6 +123,7 @@ app.post('/leader', async (req, res) => {
     const { leaderId, port } = req.body;
     currentLeaderId = leaderId;
     currentLeaderUrl = leaderId ? `http://${leaderId}:${port}` : null;
+    console.log(`[GATEWAY] leader update received: ${leaderId} (${port})`);
     
     // Notify clients about the leader
     const leaderMsg = JSON.stringify({ type: 'leader_update', leaderId });
@@ -69,10 +134,15 @@ app.post('/leader', async (req, res) => {
     if (currentLeaderUrl) {
         try {
             const stateRes = await axios.get(`${currentLeaderUrl}/state`, { timeout: 1000 });
-            const syncMsg = JSON.stringify({ type: 'sync', data: stateRes.data.log });
+            committedLog.length = 0;
+            if (Array.isArray(stateRes.data.log)) {
+                committedLog.push(...stateRes.data.log);
+            }
+            console.log(`[GATEWAY] synced ${committedLog.length} log entries from new leader`);
+            const syncMsg = JSON.stringify({ type: 'sync', data: committedLog });
             clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(syncMsg));
         } catch (err) {
-            console.error("[GATEWAY] Failed to sync state from new leader");
+            console.error("[GATEWAY] Failed to sync state from new leader", err.message);
         }
     }
 
@@ -81,10 +151,15 @@ app.post('/leader', async (req, res) => {
 
 app.post('/broadcast', (req, res) => {
     const data = req.body;
-    // Handle both single strokes and batches
+    const strokes = data.type === 'batch' ? data.strokes : [data];
+    if (Array.isArray(strokes) && strokes.length > 0) {
+        committedLog.push(...strokes);
+        console.log(`[GATEWAY] broadcast ${strokes.length} committed strokes, cache size=${committedLog.length}`);
+    }
+
     const msg = JSON.stringify({ 
         type: 'stroke', 
-        data: data.type === 'batch' ? data.strokes : [data] 
+        data: strokes
     });
 
     clients.forEach((id, c) => c.readyState === WebSocket.OPEN && c.send(msg));

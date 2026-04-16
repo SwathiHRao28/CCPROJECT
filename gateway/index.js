@@ -16,20 +16,31 @@ let studentIdCounter = 0;
 const clients = new Map(); // Store ws -> studentNumber
 const clientIdentityMap = new Map(); // Store persistent clientId -> studentNumber
 const committedLog = [];
-const replicaPorts = [4001, 4002, 4003];
+// Map of replica service names to internal Docker ports
+const replicaHosts = [
+    { host: 'replica1', port: 4001 },
+    { host: 'replica2', port: 4002 },
+    { host: 'replica3', port: 4003 },
+];
+
+let leaderDiscoveryInProgress = false;
 
 async function discoverLeaderFromReplicas() {
-    for (const port of replicaPorts) {
-        try {
-            const res = await axios.get(`http://localhost:${port}/state`, { timeout: 500 });
-            if (res.data && res.data.state === 'Leader' && res.data.id) {
-                return { leaderId: res.data.id, port, log: Array.isArray(res.data.log) ? res.data.log : [] };
-            }
-        } catch (e) {
-            // ignore unreachable replica
-        }
-    }
-    return null;
+    // Query all replicas in parallel for speed, take the first leader response
+    const results = await Promise.allSettled(
+        replicaHosts.map(({ host, port }) =>
+            axios.get(`http://${host}:${port}/state`, { timeout: 300 })
+                .then(res => {
+                    if (res.data && res.data.state === 'Leader' && res.data.id) {
+                        return { leaderId: res.data.id, port, log: Array.isArray(res.data.log) ? res.data.log : [] };
+                    }
+                    return null;
+                })
+                .catch(() => null)
+        )
+    );
+    const found = results.find(r => r.status === 'fulfilled' && r.value !== null);
+    return found ? found.value : null;
 }
 
 function broadcastLeaderUpdate(leaderId) {
@@ -86,31 +97,46 @@ wss.on('connection', ws => {
 
         if (parsed.type !== 'stroke') return;
 
-        const sendStroke = async (url) => {
-            await axios.post(`${url}/stroke`, parsed.data, { timeout: 2000 });
+        const sendStroke = (url) => {
+            // Fire-and-forget with a short timeout so dead-leader detection is fast
+            axios.post(`${url}/stroke`, parsed.data, { timeout: 400 })
+                .catch(async () => {
+                    // Avoid multiple concurrent discovery races
+                    if (leaderDiscoveryInProgress) return;
+                    leaderDiscoveryInProgress = true;
+                    console.warn("[GATEWAY] Stroke failed on current leader, rediscovering...");
+                    // Immediately clear the dead leader so new strokes don't pile up on it
+                    currentLeaderUrl = null;
+                    try {
+                        const leaderInfo = await discoverLeaderFromReplicas();
+                        if (leaderInfo) {
+                            await refreshLeaderState(leaderInfo.leaderId, leaderInfo.port, leaderInfo.log);
+                            // Retry this stroke on the newly discovered leader
+                            axios.post(`${currentLeaderUrl}/stroke`, parsed.data, { timeout: 400 })
+                                .catch(e => console.error("[GATEWAY] Stroke retry failed", e.message));
+                        } else {
+                            console.error("[GATEWAY] Stroke failed: no leader available yet (election in progress)");
+                        }
+                    } finally {
+                        leaderDiscoveryInProgress = false;
+                    }
+                });
         };
 
         if (currentLeaderUrl) {
-            try {
-                await sendStroke(currentLeaderUrl);
-                return;
-            } catch (err) {
-                console.warn("[GATEWAY] Stroke failed on current leader, rediscovering leader...");
-            }
+            sendStroke(currentLeaderUrl);
+            return;
         }
 
-        const leaderInfo = await discoverLeaderFromReplicas();
-        if (leaderInfo) {
-            await refreshLeaderState(leaderInfo.leaderId, leaderInfo.port, leaderInfo.log);
-            try {
-                await sendStroke(currentLeaderUrl);
-                return;
-            } catch (err) {
-                console.error("[GATEWAY] Stroke retry failed on discovered leader", err.message);
+        // No known leader yet — discover first, then send
+        discoverLeaderFromReplicas().then(async leaderInfo => {
+            if (leaderInfo) {
+                await refreshLeaderState(leaderInfo.leaderId, leaderInfo.port, leaderInfo.log);
+                sendStroke(currentLeaderUrl);
+            } else {
+                console.error("[GATEWAY] Stroke dropped: no leader available");
             }
-        }
-
-        console.error("[GATEWAY] Stroke failed: no leader available or stroke could not be delivered");
+        });
     });
 
     ws.on('close', () => {

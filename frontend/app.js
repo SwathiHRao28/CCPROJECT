@@ -13,8 +13,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentY = 0;
     let reconnectDelay = 200; // start fast, back off only if needed
 
-    const clientId = localStorage.getItem('drawingClientId') || Math.random().toString(36).substring(2, 15);
-    localStorage.setItem('drawingClientId', clientId);
+    // Use sessionStorage so each browser tab gets its own unique clientId.
+    // localStorage is shared across all tabs in the same browser, which would
+    // cause strokes from other tabs to be filtered out as "own" strokes.
+    const clientId = sessionStorage.getItem('drawingClientId') || Math.random().toString(36).substring(2, 15);
+    sessionStorage.setItem('drawingClientId', clientId);
 
     // Lives outside connectWebSocket — survives reconnects
     let localStrokes = [];
@@ -99,9 +102,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (message.type === 'leader_update') {
                 currentLeaderId = message.leaderId;
                 leaderIdSpan.innerText = message.leaderId || 'Election in progress...';
-                if (currentLeaderId) {
-                    syncCanvasFromLeader(currentLeaderId);
-                }
+                // Do NOT call syncCanvasFromLeader here — the gateway will send a
+                // 'sync' message with the full log immediately after leader_update,
+                // which avoids the double full-redraw and canvas flicker.
             } else if (message.type === 'identity_update') {
                 document.getElementById('student-number').innerText = `Student ${message.studentId}`;
             } else if (message.type === 'class_update') {

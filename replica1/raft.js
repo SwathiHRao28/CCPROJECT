@@ -1,4 +1,6 @@
 const axios = require('axios');
+const fs   = require('fs');
+const path = require('path');
 
 class RAFTNode {
     constructor(id, port, peers, gatewayUrl) {
@@ -30,6 +32,7 @@ class RAFTNode {
         this.broadcastTimeout = null;
 
         this.events = [];
+        this.stateFile = path.join(__dirname, 'raft-state.json');
         this.addEvent(`RAFT Init ${this.id}`);
     }
 
@@ -42,7 +45,38 @@ class RAFTNode {
     }
 
     start() {
+        this.loadState();
         this.resetElectionTimeout();
+    }
+
+    loadState() {
+        try {
+            if (fs.existsSync(this.stateFile)) {
+                const saved = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
+                this.log         = Array.isArray(saved.log) ? saved.log : [];
+                this.currentTerm = typeof saved.currentTerm === 'number' ? saved.currentTerm : 0;
+                this.votedFor    = saved.votedFor ?? null;
+                this.commitIndex = typeof saved.commitIndex === 'number' ? saved.commitIndex : -1;
+                this.addEvent(`RESTORED state: term=${this.currentTerm}, entries=${this.log.length}, commitIndex=${this.commitIndex}`);
+            }
+        } catch (err) {
+            this.addEvent(`WARN Could not load persisted state: ${err.message}`);
+        }
+    }
+
+    persistState() {
+        try {
+            const tmp = this.stateFile + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify({
+                log: this.log,
+                currentTerm: this.currentTerm,
+                votedFor: this.votedFor,
+                commitIndex: this.commitIndex
+            }), 'utf8');
+            fs.renameSync(tmp, this.stateFile);
+        } catch (err) {
+            console.error('[RAFT] Failed to persist state:', err.message);
+        }
     }
 
     getClusterSize() {
@@ -154,6 +188,7 @@ class RAFTNode {
         if (newTerm > this.currentTerm) {
             this.currentTerm = newTerm;
             this.votedFor = null;
+            this.persistState();
         }
         if (this.state !== 'Follower') {
             this.addEvent(`STATE Change -> Follower (Term ${this.currentTerm})`);
@@ -174,6 +209,7 @@ class RAFTNode {
         if (term === this.currentTerm && (this.votedFor === null || this.votedFor === candidateId)) {
             voteGranted = true;
             this.votedFor = candidateId;
+            this.persistState();
             this.resetElectionTimeout();
         }
         return { term: this.currentTerm, voteGranted };
@@ -313,6 +349,7 @@ class RAFTNode {
         if (n > this.commitIndex && this.log[n] && this.log[n].term === this.currentTerm) {
             const oldCommit = this.commitIndex;
             this.commitIndex = n;
+            this.persistState();
             this.addEvent(`SUCCESS: Majority committed strokes up to index ${n}`);
 
             for (let i = oldCommit + 1; i <= n; i++) {
@@ -353,6 +390,7 @@ class RAFTNode {
         // Advance commitIndex to reflect the entries we just received from leader
         if (missingEntries.length > 0) {
             this.commitIndex = fromIndex + missingEntries.length - 1;
+            this.persistState();
             this.addEvent(`SYNC Caught up: ${this.log.length} entries, commitIndex=${this.commitIndex}`);
         }
         return { success: true };

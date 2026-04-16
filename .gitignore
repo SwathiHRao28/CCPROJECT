@@ -2,3 +2,6 @@ node_modules
 .env
 .DS_Store
 npm-debug.log
+# RAFT persisted state (runtime files, machine-specific)
+**/raft-state.json
+**/raft-state.json.tmp
